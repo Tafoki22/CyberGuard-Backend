@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberGuard Enterprise Cloud</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; font-family: 'Segoe UI', sans-serif; }
+        .card { background-color: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
+        .status-crit { color: #ef4444; font-weight: bold; }
+        .status-safe { color: #22c55e; font-weight: bold; }
+    </style>
+</head>
+<body class="p-8">
+
+    <div class="flex justify-between items-center mb-8">
+        <div>
+            <h1 class="text-3xl font-bold text-blue-400">🛡️ CyberGuard Sovereign Cloud</h1>
+            <p class="text-gray-400">National Threat Surveillance System</p>
+        </div>
+        <div class="text-right">
+            <p class="text-sm text-gray-500">Status: <span class="text-green-400">ONLINE</span></p>
+            <p class="text-xs text-gray-600">Region: NG-Lagos-1</p>
+        </div>
+    </div>
+
+    <div class="mb-8">
+        <input type="text" id="apiKey" placeholder="Enter Enterprise API Key" class="p-2 rounded bg-slate-700 text-white w-96 border border-slate-600">
+        <button onclick="loadDashboard()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded ml-2">Load Data</button>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div class="card">
+            <h3 class="text-gray-400 text-sm">Total Assets</h3>
+            <p class="text-3xl font-bold" id="totalDevices">0</p>
+        </div>
+        <div class="card">
+            <h3 class="text-gray-400 text-sm">Active Threats</h3>
+            <p class="text-3xl font-bold text-red-500" id="activeThreats">0</p>
+        </div>
+        <div class="card">
+            <h3 class="text-gray-400 text-sm">Compliance Score</h3>
+            <p class="text-3xl font-bold text-green-500" id="compScore">0%</p>
+        </div>
+        <div class="card">
+            <h3 class="text-gray-400 text-sm">System Health</h3>
+            <p class="text-3xl font-bold text-blue-400">99.9%</p>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        
+        <div class="card lg:col-span-2">
+            <h2 class="text-xl font-bold mb-4">🔴 Live Incident Feed</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm text-gray-400">
+                    <thead class="bg-slate-700 text-gray-200 uppercase">
+                        <tr>
+                            <th class="p-3">Time</th>
+                            <th class="p-3">Device Name</th>
+                            <th class="p-3">IP Address</th>
+                            <th class="p-3">Threat</th>
+                        </tr>
+                    </thead>
+                    <tbody id="scanTable">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="text-xl font-bold mb-4">Threat Distribution</h2>
+            <canvas id="threatChart"></canvas>
+        </div>
+    </div>
+
+    <script>
+        async function loadDashboard() {
+            const key = document.getElementById('apiKey').value;
+            if(!key) return alert("Please enter an API Key");
+
+            try {
+                // Fetch Data from Python API
+                const response = await fetch(`http://127.0.0.1:8000/api/v1/dashboard/${key}`);
+                const data = await response.json();
+
+                // Update KPIs
+                document.getElementById('totalDevices').innerText = data.total_devices;
+                document.getElementById('activeThreats').innerText = data.active_threats;
+                document.getElementById('compScore').innerText = data.compliance_score + "%";
+
+                // Populate Table
+                const table = document.getElementById('scanTable');
+                table.innerHTML = ""; // Clear old data
+                data.recent_activity.forEach(scan => {
+                    const row = `<tr class="border-b border-slate-700 hover:bg-slate-800">
+                        <td class="p-3">${new Date(scan.timestamp).toLocaleTimeString()}</td>
+                        <td class="p-3">${scan.device}</td>
+                        <td class="p-3">${scan.ip}</td>
+                        <td class="p-3 ${scan.threat.includes('CRITICAL') ? 'text-red-500' : 'text-yellow-500'}">${scan.threat}</td>
+                    </tr>`;
+                    table.innerHTML += row;
+                });
+
+                // Render Chart
+                renderChart(data.active_threats, data.total_devices - data.active_threats);
+
+            } catch (error) {
+                alert("Failed to fetch data. Check API Key or Server.");
+                console.error(error);
+            }
+        }
+
+        function renderChart(critical, secure) {
+            const ctx = document.getElementById('threatChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Critical Risks', 'Secure Assets'],
+                    datasets: [{
+                        data: [critical, secure],
+                        backgroundColor: ['#ef4444', '#22c55e'],
+                        borderWidth: 0
+                    }]
+                },
+                options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: 'white' } } } }
+            });
+        }
+    </script>
+</body>
+</html>
