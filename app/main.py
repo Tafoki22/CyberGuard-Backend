@@ -1,86 +1,118 @@
 # app/main.py
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from datetime import datetime
+import secrets
 
 from app.db.database import engine, get_db, Base
 from app.models import models
 
-# 1. Create Tables
+# Auto-create tables (including the new 'devices' table)
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="CyberGuard Cloud API", version="2.2.0")
+app = FastAPI(title="CyberGuard Cloud API", version="2.5.0")
 
-# 2. ENABLE CORS (Allows Browser to fetch data)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 3. MOUNT STATIC FILES (For the Web Dashboard HTML)
-# Ensure you have a folder named 'static' with 'dashboard.html' inside it
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# --- Pydantic Models ---
+class OrgAuth(BaseModel):
+    name: str
+    api_key: str
 
-# --- MODELS ---
-class ScanCreate(BaseModel):
+class DeviceRegister(BaseModel):
+    org_name: str
+    api_key: str
     device_name: str
+    hw_id: str # Hardware ID (MAC address or similar)
+
+class ScanCreate(BaseModel):
+    device_hw_id: str # NEW: We track by Hardware ID now
     ip_address: str
     threat_level: str
     details: str
-
-class OrgCreate(BaseModel):
-    name: str
-    cac_number: str
 
 # --- ENDPOINTS ---
 
 @app.get("/")
 def root():
-    return {"system": "CyberGuard Cloud", "status": "ONLINE"}
+    return {"system": "CyberGuard Zero-Trust Cloud", "status": "ACTIVE"}
 
-@app.get("/dashboard")
-async def serve_dashboard():
-    return FileResponse('static/dashboard.html')
-
-@app.post("/api/v1/register/org")
-def register_organization(org: OrgCreate, db: Session = Depends(get_db)):
-    import secrets
-    # Check if exists
-    existing = db.query(models.Organization).filter(models.Organization.cac_number == org.cac_number).first()
-    if existing:
-        # If it exists, just return the existing key so you can use it
-        return {
-            "status": "exists", 
-            "api_key": existing.api_key, 
-            "org_id": existing.id, 
-            "message": "Organization already registered"
-        }
+# 1. ORGANIZATION ACTIVATION (Client Side Step 1)
+@app.post("/api/v1/activate")
+def activate_license(auth: OrgAuth, db: Session = Depends(get_db)):
+    """
+    Checks if Org Name + API Key match.
+    """
+    org = db.query(models.Organization).filter(
+        models.Organization.name == auth.name,
+        models.Organization.api_key == auth.api_key
+    ).first()
     
-    new_key = f"sk_live_{secrets.token_hex(16)}"
-    db_org = models.Organization(name=org.name, cac_number=org.cac_number, api_key=new_key)
-    db.add(db_org)
-    db.commit()
-    db.refresh(db_org)
-    return {"status": "success", "api_key": new_key, "org_id": db_org.id}
+    if not org:
+        raise HTTPException(status_code=401, detail="Invalid License Credentials")
+    
+    return {"status": "valid", "message": f"License Verified for {org.name}"}
 
-@app.post("/api/v1/sync/scan")
-def upload_scan(scan: ScanCreate, api_key: str, db: Session = Depends(get_db)):
-    # Authenticate
-    org = db.query(models.Organization).filter(models.Organization.api_key == api_key).first()
+# 2. DEVICE REGISTRATION (Client Side Step 2)
+@app.post("/api/v1/register/device")
+def register_device(data: DeviceRegister, db: Session = Depends(get_db)):
+    """
+    Registers a new computer. Triggers an 'Alert' (Log).
+    """
+    # Verify Org
+    org = db.query(models.Organization).filter(models.Organization.api_key == data.api_key).first()
     if not org:
         raise HTTPException(status_code=401, detail="Invalid API Key")
         
-    # Save Scan
+    # Check if device exists
+    device = db.query(models.Device).filter(models.Device.hw_id == data.hw_id).first()
+    
+    if device:
+        if device.is_blocked:
+            raise HTTPException(status_code=403, detail="ACCESS DENIED: This device is blocked by Administrator.")
+        return {"status": "exists", "message": "Device already registered"}
+
+    # Register New Device
+    new_device = models.Device(
+        organization_id=org.id,
+        device_name=data.device_name,
+        hw_id=data.hw_id,
+        status="Active"
+    )
+    db.add(new_device)
+    db.commit()
+    
+    # 🚨 SIMULATED ALERT TO ADMIN 🚨
+    print(f"⚠️ SECURITY ALERT: New Device '{data.device_name}' attempted access for {org.name}.")
+    
+    return {"status": "registered", "message": "Device Authorization Pending"}
+
+# 3. SYNC SCAN (With Block Check)
+@app.post("/api/v1/sync/scan")
+def upload_scan(scan: ScanCreate, api_key: str, db: Session = Depends(get_db)):
+    # 1. Verify Org
+    org = db.query(models.Organization).filter(models.Organization.api_key == api_key).first()
+    if not org:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+
+    # 2. Verify Device Block Status
+    device = db.query(models.Device).filter(models.Device.hw_id == scan.device_hw_id).first()
+    if device and device.is_blocked:
+        print(f"🚫 BLOCKED ATTEMPT from {device.device_name}")
+        raise HTTPException(status_code=403, detail="DEVICE BLOCKED")
+
+    # 3. Save Scan
     db_scan = models.ScanReport(
         organization_id=org.id,
-        device_name=scan.device_name,
+        device_name=device.device_name if device else "Unknown",
         ip_address=scan.ip_address,
         threat_level=scan.threat_level,
         details=scan.details
@@ -89,37 +121,23 @@ def upload_scan(scan: ScanCreate, api_key: str, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "synced"}
 
-@app.get("/api/v1/dashboard/{api_key}")
-def get_dashboard_stats(api_key: str, db: Session = Depends(get_db)):
-    # Authenticate
+# --- ADMIN DASHBOARD ---
+@app.get("/api/v1/admin/devices/{api_key}")
+def get_devices(api_key: str, db: Session = Depends(get_db)):
     org = db.query(models.Organization).filter(models.Organization.api_key == api_key).first()
-    if not org:
-        raise HTTPException(status_code=401, detail="Invalid API Key")
+    if not org: raise HTTPException(status_code=401)
+    return org.devices
 
-    # Get Scans
-    scans = db.query(models.ScanReport).filter(models.ScanReport.organization_id == org.id).all()
+# NEW: Block a Device
+@app.post("/api/v1/admin/block/{hw_id}")
+def block_device(hw_id: str, api_key: str, db: Session = Depends(get_db)):
+    org = db.query(models.Organization).filter(models.Organization.api_key == api_key).first()
+    if not org: raise HTTPException(status_code=401)
     
-    # --- CALCULATE STATS ---
-    # This was the missing definition in the previous snippet
-    critical_threats = sum(1 for s in scans if "CRITICAL" in s.threat_level)
-    
-    # Format Recent Activity for the Table
-    activity = []
-    for s in scans[-10:]: # Show last 10
-        activity.append({
-            "timestamp": s.timestamp.isoformat(),
-            "device": s.device_name,
-            "ip": s.ip_address,
-            "threat": s.threat_level
-        })
-    
-    # If no scans yet, send dummy data so the dashboard doesn't look empty
-    if not activity:
-        activity = [{"timestamp": datetime.now().isoformat(), "device": "System", "ip": "127.0.0.1", "threat": "System Ready - Waiting for Scans"}]
-
-    return {
-        "total_devices": len(scans) if len(scans) > 0 else 1,
-        "active_threats": critical_threats,
-        "compliance_score": 100 - (critical_threats * 5),
-        "recent_activity": activity
-    }
+    device = db.query(models.Device).filter(models.Device.hw_id == hw_id, models.Device.organization_id == org.id).first()
+    if device:
+        device.is_blocked = True
+        device.status = "Blocked"
+        db.commit()
+        return {"status": "blocked", "device": device.device_name}
+    raise HTTPException(status_code=404, detail="Device not found")
